@@ -1,1 +1,9 @@
- 
+services:
+  - type: web
+    name: simple-mailer
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: PORT
+        value: 10000 
