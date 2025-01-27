@@ -1,7 +1,7 @@
 services:
   - type: web
-    name: simple-mailer
-    runtime: node
-    buildCommand: npm install
-    startCommand: node server.js
-    rootDir: .
+    name: emailsender
+    runtime: docker
+    plan: free
+    buildCommand: docker build -t emailsender .
+    startCommand: docker run -p $PORT:3000 emailsender
