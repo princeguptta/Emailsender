@@ -1,16 +1,94 @@
+const express = require('express');
+const bodyParser = require('body-parser');
+const nodemailer = require('nodemailer');
+const multer = require('multer');
+const csv = require('csv-parser');
+const fs = require('fs');
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(express.static('public'));
+
+// Configure multer for file uploads
+const upload = multer({ dest: 'uploads/' });
+
+// SMTP configuration for sendzappy.com
 const transporter = nodemailer.createTransport({
-    host: 'smtp.sendzappy.com', // Your SMTP host
-    port: 587, // Use 465 for SSL/TLS
-    secure: false, // Use `true` for port 465
+    host: process.env.SMTP_HOST || 'smtp.sendzappy.com',
+    port: parseInt(process.env.SMTP_PORT || '587'),
+    secure: process.env.SMTP_SECURE === 'true',
     auth: {
-        user: 'mailme@sendzappy.com', // Your SMTP username
-        pass: '89F04EC3C30531CA74EDF25616FBE6497ADF' // Your SMTP password
+        user: process.env.SMTP_USER || 'mailme@sendzappy.com',
+        pass: process.env.SMTP_PASS || '89F04EC3C30531CA74EDF25616FBE6497ADF'
     },
     tls: {
-        rejectUnauthorized: false // Disable certificate validation (for testing only)
+        rejectUnauthorized: process.env.NODE_ENV === 'production'
     }
 });
 
+// Email queue implementation
+class EmailQueue {
+    constructor(delayMs = 3000) {
+        this.queue = [];
+        this.isProcessing = false;
+        this.delayMs = delayMs;
+    }
+
+    async add(mailOptions) {
+        return new Promise((resolve, reject) => {
+            this.queue.push({ mailOptions, resolve, reject });
+            if (!this.isProcessing) {
+                this.processQueue();
+            }
+        });
+    }
+
+    async processQueue() {
+        if (this.queue.length === 0) {
+            this.isProcessing = false;
+            return;
+        }
+
+        this.isProcessing = true;
+        const { mailOptions, resolve, reject } = this.queue.shift();
+
+        try {
+            const info = await transporter.sendMail(mailOptions);
+            resolve({ success: true, email: mailOptions.to, response: info.response });
+        } catch (error) {
+            reject({ success: false, email: mailOptions.to, error: error.message });
+        }
+
+        // Wait for the specified delay before processing the next email
+        await new Promise(resolve => setTimeout(resolve, this.delayMs));
+        this.processQueue();    
+    }
+}
+
+const emailQueue = new EmailQueue(3000); // 3 seconds delay
+
+// Route to send a single email
+app.post('/send-single-email', async (req, res) => {
+    const { to, subject, text, html } = req.body;
+
+    const mailOptions = {
+        from: 'info@sendzappy.com',
+        to: to,
+        subject: subject,
+        text: text,
+        html: html || text
+    };
+
+    try {
+        const result = await emailQueue.add(mailOptions);
+        res.send('Email sent: ' + result.response);
+    } catch (error) {
+        res.status(500).send('Error sending email: ' + error.message);
+    }
+});
+
+// Route to handle CSV upload and send emails
 app.post('/upload-csv', upload.single('csvFile'), (req, res) => {
     if (!req.file) {
         return res.status(400).send('No file uploaded.');
@@ -34,39 +112,32 @@ app.post('/upload-csv', upload.single('csvFile'), (req, res) => {
             // Send emails to all addresses
             const subject = req.body.subject || 'Test Email';
             const text = req.body.text || 'This is a test email.';
+            const html = req.body.html || text; // Add HTML support
 
             const sendPromises = emails.map((to) => {
                 const mailOptions = {
-                    from: 'info@sendzappy.com', // Sender address
-                    to: to, // Recipient email
-                    subject: subject, // Subject line
-                    text: text, // Plain text body
-                    headers: {
-                        'trackopens': 'false', // Disable open tracking
-                        'trackclicks': 'false' // Disable click tracking
-                    }
+                    from: 'info@sendzappy.com',
+                    to: to,
+                    subject: subject,
+                    text: text,
+                    html: html
                 };
 
-                return transporter.sendMail(mailOptions)
-                    .then(info => {
-                        console.log(`Email sent to ${to}: ${info.response}`);
-                        return { success: true, email: to, response: info.response };
-                    })
-                    .catch(error => {
-                        console.error(`Error sending email to ${to}: ${error.message}`);
-                        return { success: false, email: to, error: error.message };
-                    });
+                return emailQueue.add(mailOptions);
             });
 
             Promise.all(sendPromises)
                 .then(results => {
                     const successful = results.filter(result => result.success).length;
                     const failed = results.filter(result => !result.success).length;
-                    const failedEmails = results.filter(result => !result.success).map(result => `${result.email}: ${result.error}`).join('\n');
-                    res.send(`Emails sent successfully to ${successful} recipients. Failed for ${failed} recipients.\n\nFailed Emails:\n${failedEmails}`);
+                    res.send(`Emails sent successfully to ${successful} recipients. Failed for ${failed} recipients. Emails are being sent with a 3-second delay between each one.`);
                 })
                 .catch(error => {
                     res.status(500).send('Error sending emails: ' + error.message);
                 });
         });
+});
+
+app.listen(port, () => {
+    console.log(`Server running at http://localhost:${port}`);
 });
